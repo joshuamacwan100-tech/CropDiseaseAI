@@ -166,6 +166,28 @@ st.markdown("""
         margin-bottom: 14px;
     }
 
+    /* Profile avatar */
+    .profile-avatar-wrap {
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        height: 100%;
+    }
+    .profile-avatar {
+        width: 46px;
+        height: 46px;
+        border-radius: 50%;
+        background: #FFFFFF;
+        color: #1B5E20;
+        border: 2px solid rgba(255,255,255,0.85);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 1.15rem;
+        font-weight: 700;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.18);
+    }
+
     /* Hide default elements */
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
@@ -297,6 +319,7 @@ DEVICE   = torch.device("cpu")
 
 EXCEL_SIGNIN_FILE = os.path.join(os.path.dirname(__file__), "farmer_signins.xlsx")
 EXCEL_ALERTS_FILE = os.path.join(os.path.dirname(__file__), "disease_alerts.xlsx")
+EXCEL_DIAGNOSIS_FILE = os.path.join(os.path.dirname(__file__), "diagnosis_history.xlsx")
 
 CONF_THRESHOLD_LOW  = 45.0   # Below this → show low-confidence warning
 CONF_THRESHOLD_ALERT = 60.0  # Above this → show "Alert Nearby Farmers" button
@@ -367,6 +390,63 @@ def append_alert_to_excel(reporter_name: str, reporter_phone: str, district: str
     else:
         updated = pd.DataFrame([new_row])
     updated.to_excel(EXCEL_ALERTS_FILE, index=False)
+
+
+def append_diagnosis_to_excel(farmer_name: str, farmer_phone: str, district: str,
+                               crop: str, diagnosis: str, diagnosis_type: str,
+                               confidence: float):
+    """Store a farmer's AI diagnosis so it appears in their profile history."""
+    new_row = {
+        "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "Name": farmer_name,
+        "Phone": farmer_phone,
+        "District": district,
+        "Crop": crop,
+        "Diagnosis": diagnosis,
+        "Type": diagnosis_type,
+        "Confidence_Pct": round(confidence, 1)
+    }
+
+    if os.path.exists(EXCEL_DIAGNOSIS_FILE):
+        try:
+            existing = pd.read_excel(EXCEL_DIAGNOSIS_FILE, dtype=str)
+            updated = pd.concat([existing, pd.DataFrame([new_row])], ignore_index=True)
+        except Exception:
+            updated = pd.DataFrame([new_row])
+    else:
+        updated = pd.DataFrame([new_row])
+
+    updated.to_excel(EXCEL_DIAGNOSIS_FILE, index=False)
+
+
+def get_farmer_diagnosis_history(phone: str) -> pd.DataFrame:
+    """Return diagnosis history for the currently signed-in farmer."""
+    if not phone or not os.path.exists(EXCEL_DIAGNOSIS_FILE):
+        return pd.DataFrame()
+
+    try:
+        df = pd.read_excel(EXCEL_DIAGNOSIS_FILE, dtype=str)
+        if "Phone" not in df.columns:
+            return pd.DataFrame()
+
+        df = df[df["Phone"].astype(str).str.strip() == str(phone).strip()].copy()
+
+        if "Timestamp" in df.columns:
+            df["_sort_time"] = pd.to_datetime(df["Timestamp"], errors="coerce")
+            df = df.sort_values("_sort_time", ascending=False).drop(columns=["_sort_time"])
+
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+
+def get_latest_diagnosis(phone: str) -> dict | None:
+    """Return the most recent diagnosis for the current farmer."""
+    history = get_farmer_diagnosis_history(phone)
+    if history.empty:
+        return None
+    row = history.iloc[0]
+    return {col: row.get(col, "") for col in history.columns}
 
 
 def get_registered_farmers_count(district: str) -> int:
@@ -1001,19 +1081,86 @@ with st.sidebar:
 # ─────────────────────────────────────────────────────────────
 # FIGMA DYNAMIC HEADER
 # ─────────────────────────────────────────────────────────────
-st.markdown("""
-<div class='figma-header'>
-    <div style='flex: 1; min-width: 0;'>
-        <h1 class='figma-header-title'>🌾 MahaKrishi AI | महाकृषि</h1>
-        <p class='figma-header-sub'>
-            AI Crop Disease &amp; Pest Detection | Chemical &amp; Organic Remedies | Specialist Helplines &amp; Govt Schemes
-        </p>
+# Header + farmer profile
+farmer_name_header = st.session_state.get("farmer_name", "Farmer")
+farmer_phone_header = st.session_state.get("farmer_phone", "")
+farmer_district_header = st.session_state.get("farmer_district", "")
+profile_initial = farmer_name_header.strip()[0].upper() if farmer_name_header.strip() else "F"
+latest_profile_diagnosis = get_latest_diagnosis(farmer_phone_header)
+
+header_left, header_status, header_profile = st.columns([6.5, 2.2, 0.8], gap="small")
+
+with header_left:
+    st.markdown("""
+    <div class='figma-header' style='margin-bottom:0;'>
+        <div style='flex: 1; min-width: 0;'>
+            <h1 class='figma-header-title'>🌾 MahaKrishi AI | महाकृषि</h1>
+            <p class='figma-header-sub'>
+                AI Crop Disease &amp; Pest Detection | Chemical &amp; Organic Remedies | Specialist Helplines &amp; Govt Schemes
+            </p>
+        </div>
     </div>
-    <div style='flex-shrink: 0;'>
+    """, unsafe_allow_html=True)
+
+with header_status:
+    st.markdown("""
+    <div class='figma-header' style='margin-bottom:0; height:100%; box-sizing:border-box;'>
         <span class='figma-badge'>🟢 System Active | महाराष्ट्र शासन</span>
     </div>
-</div>
-""", unsafe_allow_html=True)
+    """, unsafe_allow_html=True)
+
+with header_profile:
+    st.markdown("<div class='profile-avatar-wrap'>", unsafe_allow_html=True)
+    profile_open = st.popover(profile_initial, use_container_width=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+with profile_open:
+    st.markdown(f"### 👤 {farmer_name_header}")
+    st.caption(f"📍 {farmer_district_header}  •  📱 {farmer_phone_header}")
+
+    st.markdown("---")
+    st.markdown("#### 🟢 Current Status")
+
+    if latest_profile_diagnosis:
+        current_type = latest_profile_diagnosis.get("Type", "Disease")
+        current_diagnosis = latest_profile_diagnosis.get("Diagnosis", "—")
+        current_crop = latest_profile_diagnosis.get("Crop", "—")
+        current_conf = latest_profile_diagnosis.get("Confidence_Pct", "—")
+        current_time = latest_profile_diagnosis.get("Timestamp", "—")
+
+        st.markdown(f"""
+        <div class='contact-card'>
+            <span class='badge-emergency'>Latest AI Diagnosis</span>
+            <h4 style='margin:8px 0 4px;color:#1B5E20'>{current_diagnosis}</h4>
+            <p style='margin:0;font-size:0.88rem'>
+                <b>Type:</b> {current_type}<br>
+                <b>Crop:</b> {current_crop}<br>
+                <b>Confidence:</b> {current_conf}%<br>
+                <b>Checked:</b> {current_time}
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        st.info("No AI diagnosis recorded yet. Upload a crop/pest image to begin.")
+
+    st.markdown("#### 📋 Past Diagnosis History")
+    profile_history = get_farmer_diagnosis_history(farmer_phone_header)
+
+    if profile_history.empty:
+        st.caption("Your previous AI diagnoses will appear here.")
+    else:
+        display_cols = [c for c in ["Timestamp", "Crop", "Diagnosis", "Type", "Confidence_Pct"] if c in profile_history.columns]
+        history_display = profile_history[display_cols].copy()
+        rename_map = {
+            "Timestamp": "Date & Time",
+            "Diagnosis": "Disease / Pest",
+            "Confidence_Pct": "Confidence %"
+        }
+        history_display = history_display.rename(columns=rename_map)
+        st.dataframe(history_display, use_container_width=True, hide_index=True)
+
+    st.markdown("---")
+    st.caption("History is linked to your registered mobile number.")
 
 # ─────────────────────────────────────────────────────────────
 # TAB NAVIGATION (FIGMA DASHBOARD SYSTEM)
@@ -1098,6 +1245,28 @@ with tab_detect:
                     name = top["name"]
                     conf = top["confidence"]
                     healthy = "healthy" in name.lower() or "निरोगी" in name.lower()
+
+                    # ── SAVE THIS AI DIAGNOSIS TO FARMER HISTORY ──
+                    # Only save actual analysis results; low-confidence results are kept too,
+                    # so the farmer can see what the AI previously reported.
+                    diagnosis_type = "Pest" if is_pest_mode else "Disease"
+                    history_name = st.session_state.get("farmer_name", "")
+                    history_phone = st.session_state.get("farmer_phone", "")
+                    history_district = st.session_state.get("farmer_district", "")
+                    history_crop = "Pest Analysis" if is_pest_mode else "Crop Disease"
+                    history_key = f"saved_diagnosis_{history_phone}_{uploaded.name}_{name}_{conf:.2f}"
+
+                    if history_key not in st.session_state:
+                        append_diagnosis_to_excel(
+                            farmer_name=history_name,
+                            farmer_phone=history_phone,
+                            district=history_district,
+                            crop=history_crop,
+                            diagnosis=name,
+                            diagnosis_type=diagnosis_type,
+                            confidence=conf
+                        )
+                        st.session_state[history_key] = True
 
                     # ── LOW CONFIDENCE WARNING ──
                     if conf < CONF_THRESHOLD_LOW:
