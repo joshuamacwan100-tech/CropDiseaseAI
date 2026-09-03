@@ -13,7 +13,7 @@ import base64
 import re
 import pydeck as pdk
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # ─────────────────────────────────────────────────────────────
 # PAGE CONFIG (FIGMA DASHBOARD LAYOUT)
@@ -1523,44 +1523,267 @@ with tab_contacts:
 with tab_map:
     st.markdown("<div class='figma-card'>", unsafe_allow_html=True)
     st.markdown("### 🗺️ Nearby Farmer Disease & Pest Outbreak Alert Map")
-    st.markdown("Real-time outbreak mapping across Maharashtra. Color-coded severity pins notify nearby farmers within **10 km - 50 km** radius.")
+    st.markdown(
+        "Real-time outbreak mapping across Maharashtra. "
+        "Farmer/broadcast alerts remain visible for **15 days from upload**, "
+        "then automatically disappear from the map."
+    )
 
-    # Show real alert history from Excel if available
+    # ---------------------------------------------------------
+    # DISTRICT COORDINATES
+    # Used to place farmer-uploaded/broadcast alerts on the map.
+    # ---------------------------------------------------------
+    DISTRICT_COORDINATES = {
+        "Pune": (18.5204, 73.8567),
+        "Nashik": (19.9975, 73.7898),
+        "Kolhapur": (16.7050, 74.2433),
+        "Solapur": (17.6599, 75.9064),
+        "Chhatrapati Sambhajinagar": (19.8762, 75.3433),
+        "Sambhajinagar": (19.8762, 75.3433),
+        "Nagpur": (21.1458, 79.0882),
+        "Amravati": (20.9374, 77.7796),
+        "Latur": (18.4088, 76.5604),
+        "Satara": (17.6805, 74.0183),
+        "Thane": (19.2183, 72.9781),
+        "Ahmednagar": (19.0948, 74.7480),
+        "Jalgaon": (21.0077, 75.5626),
+        "Nanded": (19.1383, 77.3210),
+        "Osmanabad": (18.1860, 76.0419),
+        "Beed": (18.9891, 75.7601),
+        "Buldhana": (20.5293, 76.1842),
+        "Wardha": (20.7453, 78.6022),
+        "Yavatmal": (20.3888, 78.1204),
+        "Akola": (20.7002, 77.0082),
+        "Washim": (20.1117, 77.1330),
+        "Ratnagiri": (16.9902, 73.3120),
+        "Sindhudurg": (16.3492, 73.5594),
+    }
+
+    # ---------------------------------------------------------
+    # LOAD FARMER/BROADCAST ALERTS AND EXPIRE THEM AFTER 15 DAYS
+    #
+    # IMPORTANT:
+    # - Old records are NOT deleted from Excel.
+    # - Only alerts older than 15 days are removed from the
+    #   active map/list.
+    # ---------------------------------------------------------
+    active_farmer_alerts = []
+
     if os.path.exists(EXCEL_ALERTS_FILE):
         try:
             alerts_df = pd.read_excel(EXCEL_ALERTS_FILE, dtype=str)
-            if not alerts_df.empty:
-                st.markdown("#### 📋 Recent AI-Detected Alerts (from Registered Farmers):")
-                st.dataframe(
-                    alerts_df[["Timestamp", "Reporter_Name", "District", "Crop_Disease", "Confidence_Pct"]]
-                    .tail(10)
-                    .rename(columns={
-                        "Timestamp": "Date/Time",
-                        "Reporter_Name": "Reported By",
-                        "District": "District",
-                        "Crop_Disease": "Disease/Pest",
-                        "Confidence_Pct": "AI Confidence (%)"
-                    }),
-                    use_container_width=True,
-                    hide_index=True
-                )
-        except Exception:
-            pass
 
-    # Outbreak Data Points in Maharashtra
+            if not alerts_df.empty and "Timestamp" in alerts_df.columns:
+                alerts_df["Timestamp"] = pd.to_datetime(
+                    alerts_df["Timestamp"],
+                    errors="coerce"
+                )
+
+                cutoff_date = datetime.now() - timedelta(days=15)
+
+                # Keep only alerts uploaded within the last 15 days.
+                active_df = alerts_df[
+                    alerts_df["Timestamp"].notna()
+                    & (alerts_df["Timestamp"] >= cutoff_date)
+                ].copy()
+
+                if not active_df.empty:
+                    # Newest alerts first.
+                    active_df = active_df.sort_values(
+                        "Timestamp", ascending=False
+                    )
+
+                    st.markdown(
+                        "#### 📋 Active AI-Detected Alerts "
+                        "(uploaded within the last 15 days):"
+                    )
+
+                    display_cols = [
+                        "Timestamp",
+                        "Reporter_Name",
+                        "District",
+                        "Crop_Disease",
+                        "Confidence_Pct"
+                    ]
+
+                    available_cols = [
+                        c for c in display_cols if c in active_df.columns
+                    ]
+
+                    if available_cols:
+                        display_df = active_df[available_cols].head(10).copy()
+
+                        display_df = display_df.rename(columns={
+                            "Timestamp": "Date/Time",
+                            "Reporter_Name": "Reported By",
+                            "District": "District",
+                            "Crop_Disease": "Disease/Pest",
+                            "Confidence_Pct": "AI Confidence (%)"
+                        })
+
+                        st.dataframe(
+                            display_df,
+                            use_container_width=True,
+                            hide_index=True
+                        )
+
+                    # Convert active Excel records into map markers.
+                    for _, row in active_df.iterrows():
+                        district = str(row.get("District", "")).strip()
+
+                        # Exact district first, then try the first word
+                        # for entries such as "Pune (Baramati)".
+                        coords = DISTRICT_COORDINATES.get(district)
+
+                        if coords is None:
+                            base_district = district.split(" (")[0].strip()
+                            coords = DISTRICT_COORDINATES.get(base_district)
+
+                        if coords is None:
+                            # "Other" or an unknown district cannot be
+                            # safely plotted without coordinates.
+                            continue
+
+                        timestamp = row.get("Timestamp")
+
+                        if pd.isna(timestamp):
+                            continue
+
+                        age_days = max(
+                            0,
+                            (datetime.now() - timestamp.to_pydatetime()).total_seconds()
+                            / 86400
+                        )
+
+                        confidence = pd.to_numeric(
+                            row.get("Confidence_Pct", 0),
+                            errors="coerce"
+                        )
+
+                        if pd.isna(confidence):
+                            confidence = 0.0
+
+                        if confidence >= 60:
+                            severity = "🔴 Active Alert"
+                            marker_color = [211, 47, 47, 180]
+                        elif confidence >= 45:
+                            severity = "🟠 Warning"
+                            marker_color = [245, 124, 0, 180]
+                        else:
+                            severity = "🟡 Low Confidence"
+                            marker_color = [251, 192, 45, 180]
+
+                        issue = str(
+                            row.get("Crop_Disease", "Disease/Pest Alert")
+                        )
+
+                        crop = str(
+                            row.get("Crop_Type", "Crop")
+                        )
+
+                        reporter = str(
+                            row.get("Reporter_Name", "Farmer")
+                        )
+
+                        active_farmer_alerts.append({
+                            "district": district,
+                            "lat": coords[0],
+                            "lon": coords[1],
+                            "issue": issue,
+                            "crop": crop,
+                            "severity": severity,
+                            "radius": 10000,
+                            "color": marker_color,
+                            "source": "Farmer Report",
+                            "reported_by": reporter,
+                            "timestamp": timestamp.strftime(
+                                "%Y-%m-%d %H:%M:%S"
+                            ),
+                            "age_days": round(age_days, 1),
+                            "confidence": round(float(confidence), 1)
+                        })
+
+        except Exception as e:
+            st.warning(f"Could not load farmer alert history: {e}")
+
+    # ---------------------------------------------------------
+    # STATIC REGIONAL OUTBREAK DATA
+    # These are the original reference/demo markers and are
+    # intentionally kept as permanent regional reference points.
+    # The 15-day expiry applies to uploaded/broadcast alerts.
+    # ---------------------------------------------------------
     outbreaks = [
-        {"district": "Nashik", "lat": 20.0059, "lon": 73.7898, "issue": "Fall Armyworm (लष्करी अळी)", "crop": "Maize / मका", "severity": "🔴 Emergency Outbreak", "radius": 15000, "color": [211, 47, 47, 180]},
-        {"district": "Kolhapur", "lat": 16.7050, "lon": 74.2433, "issue": "Sugarcane Red Rot (ऊस तांबेरा)", "crop": "Sugarcane / ऊस", "severity": "🟠 Warning", "radius": 20000, "color": [245, 124, 0, 180]},
-        {"district": "Pune (Baramati)", "lat": 18.1519, "lon": 74.5768, "issue": "Early Shoot Borer (खोड कीड)", "crop": "Sugarcane / ऊस", "severity": "🔴 Emergency Outbreak", "radius": 12000, "color": [211, 47, 47, 180]},
-        {"district": "Nagpur", "lat": 21.1458, "lon": 79.0882, "issue": "Pink Bollworm (गुलाबी बोंडअळी)", "crop": "Cotton / कापूस", "severity": "🔴 Emergency Outbreak", "radius": 25000, "color": [211, 47, 47, 180]},
-        {"district": "Sambhajinagar", "lat": 19.8762, "lon": 75.3433, "issue": "Whitefly Pest (पांढरी माशी)", "crop": "Cotton / कापूस", "severity": "🟡 Advisory Watch", "radius": 18000, "color": [251, 192, 45, 180]},
-        {"district": "Solapur", "lat": 17.6599, "lon": 75.9064, "issue": "Aphids Damage (मावा)", "crop": "Vegetables / भाजीपाला", "severity": "🟠 Warning", "radius": 10000, "color": [245, 124, 0, 180]}
+        {
+            "district": "Nashik",
+            "lat": 20.0059,
+            "lon": 73.7898,
+            "issue": "Fall Armyworm (लष्करी अळी)",
+            "crop": "Maize / मका",
+            "severity": "🔴 Emergency Outbreak",
+            "radius": 15000,
+            "color": [211, 47, 47, 180]
+        },
+        {
+            "district": "Kolhapur",
+            "lat": 16.7050,
+            "lon": 74.2433,
+            "issue": "Sugarcane Red Rot (ऊस तांबेरा)",
+            "crop": "Sugarcane / ऊस",
+            "severity": "🟠 Warning",
+            "radius": 20000,
+            "color": [245, 124, 0, 180]
+        },
+        {
+            "district": "Pune (Baramati)",
+            "lat": 18.1519,
+            "lon": 74.5768,
+            "issue": "Early Shoot Borer (खोड कीड)",
+            "crop": "Sugarcane / ऊस",
+            "severity": "🔴 Emergency Outbreak",
+            "radius": 12000,
+            "color": [211, 47, 47, 180]
+        },
+        {
+            "district": "Nagpur",
+            "lat": 21.1458,
+            "lon": 79.0882,
+            "issue": "Pink Bollworm (गुलाबी बोंडअळी)",
+            "crop": "Cotton / कापूस",
+            "severity": "🔴 Emergency Outbreak",
+            "radius": 25000,
+            "color": [211, 47, 47, 180]
+        },
+        {
+            "district": "Sambhajinagar",
+            "lat": 19.8762,
+            "lon": 75.3433,
+            "issue": "Whitefly Pest (पांढरी माशी)",
+            "crop": "Cotton / कापूस",
+            "severity": "🟡 Advisory Watch",
+            "radius": 18000,
+            "color": [251, 192, 45, 180]
+        },
+        {
+            "district": "Solapur",
+            "lat": 17.6599,
+            "lon": 75.9064,
+            "issue": "Aphids Damage (मावा)",
+            "crop": "Vegetables / भाजीपाला",
+            "severity": "🟠 Warning",
+            "radius": 10000,
+            "color": [245, 124, 0, 180]
+        }
     ]
+
+    # ---------------------------------------------------------
+    # COMBINE STATIC REFERENCE MARKERS + ACTIVE FARMER ALERTS
+    # ---------------------------------------------------------
+    map_outbreaks = outbreaks + active_farmer_alerts
 
     # PyDeck Map
     layer = pdk.Layer(
         "ScatterplotLayer",
-        data=outbreaks,
+        data=map_outbreaks,
         get_position="[lon, lat]",
         get_color="color",
         get_radius="radius",
@@ -1582,58 +1805,158 @@ with tab_map:
     r = pdk.Deck(
         layers=[layer],
         initial_view_state=view_state,
-        tooltip={"html": "<b>{district}</b><br><b>Issue:</b> {issue}<br><b>Crop:</b> {crop}<br><b>Status:</b> {severity}"}
+        tooltip={
+            "html": """
+            <b>{district}</b><br>
+            <b>Issue:</b> {issue}<br>
+            <b>Crop:</b> {crop}<br>
+            <b>Status:</b> {severity}<br>
+            <b>Source:</b> {source}<br>
+            <b>Reported By:</b> {reported_by}<br>
+            <b>Uploaded:</b> {timestamp}<br>
+            <b>Age:</b> {age_days} days
+            """
+        }
     )
 
     st.pydeck_chart(r)
 
-    # Active Alert List
+    # ---------------------------------------------------------
+    # ACTIVE ALERT LIST
+    # ---------------------------------------------------------
     st.markdown("#### 🚨 Active Regional Outbreak Alerts:")
-    m1, m2 = st.columns(2)
-    for idx, ob in enumerate(outbreaks):
-        target_col = m1 if idx % 2 == 0 else m2
-        with target_col:
-            badge_type = "badge-emergency" if "Emergency" in ob["severity"] else ("badge-warning" if "Warning" in ob["severity"] else "badge-success")
-            # Show real registered farmer count for district
-            reg_count = get_registered_farmers_count(ob["district"].split(" ")[0])
-            reg_info  = f" | <b>Registered Farmers:</b> {reg_count}" if reg_count > 0 else ""
-            st.markdown(f"""
-            <div class='contact-card'>
-                <span class='{badge_type}'>{ob['severity']}</span>
-                <h4 style='margin:8px 0 2px;color:#1B5E20'>📍 {ob['district']} — {ob['issue']}</h4>
-                <p style='margin:0;font-size:0.88rem;color:#558B2F'>
-                <b>Affected Crop:</b> {ob['crop']} | <b>Impact Radius:</b> {ob['radius']//1000} km{reg_info}
-                </p>
-            </div>""", unsafe_allow_html=True)
 
-    # Broadcast Alert Form
+    m1, m2 = st.columns(2)
+
+    for idx, ob in enumerate(map_outbreaks):
+        target_col = m1 if idx % 2 == 0 else m2
+
+        with target_col:
+            badge_type = (
+                "badge-emergency"
+                if "Emergency" in ob["severity"] or "Active" in ob["severity"]
+                else (
+                    "badge-warning"
+                    if "Warning" in ob["severity"]
+                    else "badge-success"
+                )
+            )
+
+            # Show registered farmer count for district.
+            reg_count = get_registered_farmers_count(
+                ob["district"].split(" (")[0].strip()
+            )
+
+            reg_info = (
+                f" | <b>Registered Farmers:</b> {reg_count}"
+                if reg_count > 0
+                else ""
+            )
+
+            source_info = ""
+
+            if ob.get("source") == "Farmer Report":
+                source_info = (
+                    f"<br><b>Source:</b> Farmer Report"
+                    f" | <b>Uploaded:</b> {ob.get('timestamp', 'N/A')}"
+                    f" | <b>Age:</b> {ob.get('age_days', 0)} days"
+                    f" | <b>Confidence:</b> {ob.get('confidence', 0)}%"
+                )
+
+            st.markdown(
+                f"""
+                <div class='contact-card'>
+                    <span class='{badge_type}'>{ob['severity']}</span>
+                    <h4 style='margin:8px 0 2px;color:#1B5E20'>
+                        📍 {ob['district']} — {ob['issue']}
+                    </h4>
+                    <p style='margin:0;font-size:0.88rem;color:#558B2F'>
+                        <b>Affected Crop:</b> {ob['crop']}
+                        | <b>Impact Radius:</b> {ob['radius']//1000} km
+                        {reg_info}
+                        {source_info}
+                    </p>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+
+    if not active_farmer_alerts:
+        st.info(
+            "No farmer-uploaded/broadcast alerts are currently active. "
+            "New alerts will appear here for 15 days after upload."
+        )
+
+    # ---------------------------------------------------------
+    # BROADCAST ALERT FORM
+    # ---------------------------------------------------------
     st.markdown("---")
     st.markdown("#### 📢 Broadcast New Disease/Pest Alert to Nearby Farmers")
+
     with st.form("alert_broadcast"):
         ac1, ac2, ac3 = st.columns(3)
-        b_dist  = ac1.selectbox("जिल्हा / District", ALL_DISTRICTS)
-        b_crop  = ac2.text_input("पीक / Crop Name", "Sugarcane / कापूस / धान")
-        b_issue = ac3.selectbox("रोग / कीड / Issue Type", ["Pink Bollworm", "Fall Armyworm", "Red Rot", "Rice Blast", "Aphids", "Whitefly"])
-        b_desc  = st.text_area("अलर्ट माहिती / Detailed Outbreak Description")
-        broadcast_btn = st.form_submit_button("🚨 Broadcast SMS & Map Alert | अलर्ट जारी करा", type="primary")
+
+        b_dist = ac1.selectbox(
+            "जिल्हा / District",
+            ALL_DISTRICTS
+        )
+
+        b_crop = ac2.text_input(
+            "पीक / Crop Name",
+            "Sugarcane / कापूस / धान"
+        )
+
+        b_issue = ac3.selectbox(
+            "रोग / कीड / Issue Type",
+            [
+                "Pink Bollworm",
+                "Fall Armyworm",
+                "Red Rot",
+                "Rice Blast",
+                "Aphids",
+                "Whitefly"
+            ]
+        )
+
+        b_desc = st.text_area(
+            "अलर्ट माहिती / Detailed Outbreak Description"
+        )
+
+        broadcast_btn = st.form_submit_button(
+            "🚨 Broadcast SMS & Map Alert | अलर्ट जारी करा",
+            type="primary"
+        )
 
         if broadcast_btn:
             reg_in_dist = get_registered_farmers_count(b_dist)
             reach = max(reg_in_dist, 1)
-            # Log broadcast alert
+
+            # Log broadcast alert.
+            # Timestamp is automatically stored by append_alert_to_excel().
             append_alert_to_excel(
-                reporter_name=st.session_state.get("farmer_name", "Unknown"),
-                reporter_phone=st.session_state.get("farmer_phone", ""),
+                reporter_name=st.session_state.get(
+                    "farmer_name",
+                    "Unknown"
+                ),
+                reporter_phone=st.session_state.get(
+                    "farmer_phone",
+                    ""
+                ),
                 district=b_dist,
                 crop=b_crop,
                 disease=b_issue,
                 confidence=100.0
             )
+
             st.success(
                 f"🚨 अलर्ट यशस्वीपणे पाठवला! "
                 f"**{b_dist}** परिसरातील **{reach}** नोंदणीकृत शेतकऱ्यांना "
-                f"**{b_issue}** बद्दल अलर्ट पाठवण्यात आला आहे."
+                f"**{b_issue}** बद्दल अलर्ट पाठवण्यात आला आहे. "
+                f"हा map alert 15 दिवसांसाठी active राहील."
             )
+
+            # Refresh so the newly uploaded alert appears immediately.
+            st.rerun()
 
     st.markdown("</div>", unsafe_allow_html=True)
 
